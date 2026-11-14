@@ -19,7 +19,7 @@ manifest，seccomp 过滤器在两个架构上都生效，CI 对两者都做构�
 | **网络** | **bridge / macvlan / none / host 四种驱动；`network create/ls/inspect/rm/prune/connect/disconnect` 管理；每网络独立 IPAM（subnet / gateway / ip-range / aux-address / --ip / --mac-address）；容器多网络接入与运行中热插拔；`--dns` / `--add-host` / `--network-alias` 名字发现** |
 | 防火墙 | 网络级 MASQUERADE / ICC 规则，**nftables 优先、iptables 降级**（对齐 docker `--firewall-backend`），支持 `--internal` 与 `enable_ip_masquerade=false` |
 | 端口映射 | 纯用户态 TCP/UDP 转发器（仅 bridge 网络，不需要 DNAT 权限） |
-| 生命周期 | 前台 run / `-d` 双 fork supervisor / 重启策略 / ps、kill、rm、logs、**exec（含 -it）**、`system prune` |
+| 生命周期 | 前台 run / `-d` 双 fork supervisor / 重启策略 / ps、kill、stop、start、restart、rm、logs、**exec（含 -it）**、`system prune` |
 | 状态 | `<state_root>` 下的 `state.json` + `networks.json` + flock，无 daemon |
 
 ## 编译

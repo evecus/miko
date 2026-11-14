@@ -147,21 +147,19 @@ fn run_healthcheck(root: &Path, s: &ContainerState, hc: &Healthcheck) {
 
     let ok = probe_in_container(root, &s.id, &hc.test, hc.timeout_secs);
     let mut streak = s.health_fail_streak;
-    let mut status = s.health_status.clone().unwrap_or_else(|| "starting".into());
-
-    if ok {
+    let status = if ok {
         streak = 0;
-        status = "healthy".into();
+        "healthy".to_string()
     } else if in_start_period {
-        status = "starting".into();
+        "starting".to_string()
     } else {
         streak = streak.saturating_add(1);
-        status = if streak >= hc.retries {
-            "unhealthy".into()
+        if streak >= hc.retries {
+            "unhealthy".to_string()
         } else {
-            "starting".into()
-        };
-    }
+            "starting".to_string()
+        }
+    };
 
     {
         let _g = match state::lock(root) {

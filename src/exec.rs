@@ -533,14 +533,15 @@ fn open_pty() -> Result<Pty> {
         }
         bail!("unlockpt: {}", io::Error::last_os_error());
     }
-    let mut buf = [0i8; 64];
+    // c_char 在不同目标上可能是 i8 或 u8，统一用 libc::c_char
+    let mut buf = [0 as libc::c_char; 64];
     if unsafe { libc::ptsname_r(master, buf.as_mut_ptr(), buf.len()) } != 0 {
         unsafe {
             close(master).ok();
         }
         bail!("ptsname_r: {}", io::Error::last_os_error());
     }
-    let path = unsafe { CStr::from_ptr(buf.as_ptr()) }
+    let path = unsafe { CStr::from_ptr(buf.as_ptr() as *const _) }
         .to_string_lossy()
         .into_owned();
     // 关键：在宿主命名空间打开 slave。进入容器 mnt ns 后再 open 路径会 ENOENT。
