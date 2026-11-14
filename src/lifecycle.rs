@@ -1,8 +1,10 @@
-//! ps / kill / rm / logs：直接读写状态目录，不经过 daemon。
+//! ps / kill / stop / rm / logs：直接读写状态目录，不经过 daemon。
 
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::network;
 use crate::state::{self, ContainerState};
@@ -126,6 +128,100 @@ pub fn kill(root: &Path, id_input: &str, signal: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
+/// 对齐 `docker stop`：先发 StopSignal（默认 TERM），等待最多 `timeout` 秒，
+/// 仍未退出再 SIGKILL。同时给 supervisor 发 TERM 阻止重启策略拉起。
+pub fn stop(root: &Path, ids: &[String], timeout_secs: u64) -> Result<i32> {
+    for input in ids {
+        stop_one(root, input, timeout_secs)?;
+    }
+    Ok(0)
+}
+
+fn stop_one(root: &Path, id_input: &str, timeout_secs: u64) -> Result<()> {
+    let (id, pid, supervisor_pid, sig_name, sig) = {
+        let _g = state::lock(root)?;
+        let id = state::resolve_id(root, id_input)?;
+        let s = state::load(root, &id)?;
+        let sig_name = s.stop_signal.clone();
+        let sig = parse_signal(&sig_name)
+            .with_context(|| format!("容器 {id} 的 StopSignal {sig_name:?} 非法"))?;
+
+        // 先打 stop marker，避免 always / unless-stopped 在等待期间被拉起
+        state::set_stop_marker(root, &id)?;
+
+        if !state::alive(s.pid) && !s.supervisor_pid.is_some_and(state::alive) {
+            let mut s = s;
+            s.status = "stopped".into();
+            if s.finished_at.is_none() {
+                s.finished_at = Some(state::now());
+            }
+            state::save(root, &s)?;
+            println!("miko: 容器 {id} 已不在运行，仅记录停止状态");
+            return Ok(());
+        }
+
+        (id, s.pid, s.supervisor_pid, sig_name, sig)
+    };
+
+    // 发优雅停止信号（不持锁，避免长时间卡住其它命令）
+    if state::alive(pid) {
+        let rc = unsafe { libc::kill(pid, sig) };
+        if rc != 0 {
+            bail!(
+                "向容器 init {pid} 发送信号 {sig_name} 失败: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    if let Some(sp) = supervisor_pid {
+        if state::alive(sp) {
+            let _ = unsafe { libc::kill(sp, libc::SIGTERM) };
+        }
+    }
+
+    // 等待退出
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        if !state::alive(pid) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // 超时仍存活 → SIGKILL
+    if state::alive(pid) {
+        let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
+        if rc != 0 && state::alive(pid) {
+            bail!(
+                "向容器 init {pid} 发送 SIGKILL 失败: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        // 再等一小会儿确认消失
+        for _ in 0..20 {
+            if !state::alive(pid) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // supervisor 若还在，也强杀
+    if let Some(sp) = supervisor_pid {
+        if state::alive(sp) {
+            let _ = unsafe { libc::kill(sp, libc::SIGKILL) };
+        }
+    }
+
+    let _g = state::lock(root)?;
+    let mut s = state::load(root, &id)?;
+    s.status = "stopped".into();
+    s.finished_at = Some(state::now());
+    // pid 仍可能短暂存在于 state，effective_status 会用 alive() 判断
+    state::save(root, &s)?;
+    println!("{id}");
+    Ok(())
+}
+
 pub fn rm(root: &Path, ids: &[String], force: bool) -> Result<i32> {
     for input in ids {
         let id = state::resolve_id(root, input)?;
@@ -137,7 +233,7 @@ pub fn rm(root: &Path, ids: &[String], force: bool) -> Result<i32> {
             let _g = state::lock(root)?;
             let s = state::load(root, &id)?;
             if effective_status(&s) == "running" {
-                bail!("容器 {id} 正在运行，请先 miko kill {id} 或使用 -f");
+                bail!("容器 {id} 正在运行，请先 miko stop/kill {id} 或使用 -f");
             }
             s
         };

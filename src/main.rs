@@ -77,6 +77,7 @@ fn real_main() -> Result<i32> {
         }
         cli::Command::Ps(a) => lifecycle::ps(&state_root, a.all),
         cli::Command::Kill(a) => lifecycle::kill(&state_root, &a.id, a.signal.as_deref()),
+        cli::Command::Stop(a) => lifecycle::stop(&state_root, &a.ids, a.time),
         cli::Command::Rm(a) => lifecycle::rm(&state_root, &a.ids, a.force),
         cli::Command::Logs(a) => lifecycle::logs(&state_root, &a.id),
         cli::Command::Exec(a) => exec::exec(&state_root, &a),

@@ -59,6 +59,9 @@ pub enum Command {
     /// 向容器发送信号
     Kill(KillArgs),
 
+    /// 优雅停止容器（先 StopSignal，超时后 SIGKILL；对齐 docker stop）
+    Stop(StopArgs),
+
     /// 删除已停止的容器
     Rm(RmArgs),
 
@@ -366,6 +369,17 @@ pub struct KillArgs {
     /// 信号名或编号（缺省用镜像 StopSignal，镜像未声明则 TERM）
     #[arg(short = 's', long = "signal")]
     pub signal: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StopArgs {
+    /// 容器 id 或名称（可多个）
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+
+    /// 等待优雅退出的秒数，超时后 SIGKILL（默认 10，对齐 docker stop）
+    #[arg(short = 't', long = "time", default_value_t = 10)]
+    pub time: u64,
 }
 
 #[derive(clap::Args, Debug)]
