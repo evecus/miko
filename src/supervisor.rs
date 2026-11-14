@@ -150,6 +150,6 @@ fn run_loop(p: &container::Prepared) -> Result<i32> {
         s.supervisor_pid = None;
         state::save(root, &s)?;
     }
-    container::cleanup_bundle(p);
+    // 不删除 bundle：对齐 docker，停止/退出后仍可 `miko start`，只有 `miko rm` 清理。
     Ok(0)
 }

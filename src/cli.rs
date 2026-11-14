@@ -62,6 +62,12 @@ pub enum Command {
     /// 优雅停止容器（先 StopSignal，超时后 SIGKILL；对齐 docker stop）
     Stop(StopArgs),
 
+    /// 启动已停止的容器（复用原 bundle / 网络；对齐 docker start）
+    Start(StartArgs),
+
+    /// 重启容器（先 stop 再 start；对齐 docker restart）
+    Restart(RestartArgs),
+
     /// 删除已停止的容器
     Rm(RmArgs),
 
@@ -378,6 +384,24 @@ pub struct StopArgs {
     pub ids: Vec<String>,
 
     /// 等待优雅退出的秒数，超时后 SIGKILL（默认 10，对齐 docker stop）
+    #[arg(short = 't', long = "time", default_value_t = 10)]
+    pub time: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StartArgs {
+    /// 容器 id 或名称（可多个）
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct RestartArgs {
+    /// 容器 id 或名称（可多个）
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+
+    /// stop 阶段等待优雅退出的秒数，超时后 SIGKILL（默认 10）
     #[arg(short = 't', long = "time", default_value_t = 10)]
     pub time: u64,
 }

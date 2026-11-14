@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use crate::cli::RunArgs;
-use crate::options::{RuntimeOptions, UsernsRoot};
+use crate::network::DriverKind;
+use crate::options::{FirewallBackend, RestartPolicy, RuntimeOptions, SeccompMode, UsernsRoot};
 use crate::spec::{self, Limits, OciSpec};
 use crate::{image, network, runtime, state, supervisor};
 
@@ -174,8 +175,171 @@ pub fn run(args: &RunArgs, state_root: &Path, concurrency: usize) -> Result<i32>
         s.finished_at = Some(state::now());
         state::save(state_root, &s)?;
     }
-    cleanup_bundle(&p);
+    // 不删除 bundle：对齐 docker，退出后仍可 `miko start`，只有 `miko rm` 清理。
     Ok(code)
+}
+
+/// 从已有 state + bundle 重建 Prepared，供 `miko start` 使用。
+pub fn prepare_from_state(state_root: &Path, s: &state::ContainerState) -> Result<Prepared> {
+    if !s.bundle.is_dir() {
+        bail!(
+            "容器 {} 的 bundle 不存在（{}）；可能已被清理，无法 start",
+            s.id,
+            s.bundle.display()
+        );
+    }
+    let cfg = spec::read(&s.bundle)
+        .with_context(|| format!("读取 {}/config.json 失败", s.bundle.display()))?;
+
+    let driver = DriverKind::parse(if cfg.miko.driver.is_empty() {
+        "bridge"
+    } else {
+        &cfg.miko.driver
+    })
+    .unwrap_or(DriverKind::Bridge);
+
+    let container_ip = s
+        .ip
+        .as_deref()
+        .and_then(|ip| ip.parse().ok())
+        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+
+    let restart = parse_restart_policy(&s.restart_policy);
+    let seccomp = match cfg.miko.seccomp.as_str() {
+        "unconfined" => SeccompMode::Unconfined,
+        _ => SeccompMode::Default,
+    };
+    let apparmor = if cfg.miko.apparmor.is_empty() {
+        None
+    } else {
+        Some(cfg.miko.apparmor.clone())
+    };
+
+    let limits = Limits {
+        memory: cfg
+            .linux
+            .resources
+            .as_ref()
+            .and_then(|r| r.memory.as_ref().map(|m| m.limit)),
+        cpus: cfg.linux.resources.as_ref().and_then(|r| {
+            r.cpu.as_ref().and_then(|c| {
+                if c.period > 0 && c.quota > 0 {
+                    Some(c.quota as f64 / c.period as f64)
+                } else {
+                    None
+                }
+            })
+        }),
+        pids: cfg.linux.resources.as_ref().and_then(|r| {
+            r.pids.as_ref().and_then(|p| {
+                if p.limit > 0 {
+                    Some(p.limit as u32)
+                } else {
+                    None
+                }
+            })
+        }),
+    };
+
+    let opts = RuntimeOptions {
+        driver,
+        network_ref: cfg.miko.net_mode.clone(),
+        network_name: s.network_name.clone().unwrap_or_else(|| cfg.miko.net_mode.clone()),
+        container_ip,
+        endpoint_ip: s.ip.as_deref().and_then(|ip| ip.parse().ok()),
+        mac: None,
+        aliases: Vec::new(),
+        nat: cfg.miko.nat,
+        dns: cfg.miko.dns.clone(),
+        dns_search: cfg.miko.dns_search.clone(),
+        dns_opts: cfg.miko.dns_opts.clone(),
+        extra_hosts: cfg.miko.extra_hosts.clone(),
+        ports: s.ports.clone(),
+        seccomp,
+        apparmor,
+        userns: cfg.miko.userns,
+        userns_root: if cfg.miko.userns_chroot {
+            UsernsRoot::Chroot
+        } else {
+            UsernsRoot::Pivot
+        },
+        uid_maps: cfg.miko.uid_maps.clone(),
+        gid_maps: cfg.miko.gid_maps.clone(),
+        restart,
+        detach: true, // start 始终后台
+        platform: crate::arch::host().unwrap_or(crate::arch::HostArch::Amd64),
+        firewall: FirewallBackend::Auto,
+        state_root: state_root.to_path_buf(),
+    };
+
+    // start_once 只用到 args.no_cgroup / keep；其余填占位
+    let args = RunArgs {
+        image: s.image.clone(),
+        name: Some(s.id.clone()),
+        hostname: None,
+        memory: None,
+        cpus: None,
+        pids: None,
+        no_cgroup: limits.is_empty(),
+        envs: Vec::new(),
+        workdir: None,
+        user: None,
+        no_cap_drop: false,
+        readonly_rootfs: false,
+        bundle_dir: Some(s.bundle.clone()),
+        keep: true, // start 后仍保留，交给 rm
+        insecure_registry: false,
+        pull: false,
+        platform: None,
+        firewall_backend: "auto".into(),
+        detach: true,
+        restart: s.restart_policy.clone(),
+        volumes: Vec::new(),
+        publish: Vec::new(),
+        net: opts.network_ref.clone(),
+        nat: opts.nat,
+        ip: s.ip.clone(),
+        mac_address: None,
+        network_alias: Vec::new(),
+        dns: Vec::new(),
+        dns_search: Vec::new(),
+        dns_opt: Vec::new(),
+        add_host: Vec::new(),
+        userns: opts.userns,
+        userns_root: if opts.userns_root == UsernsRoot::Chroot {
+            "chroot".into()
+        } else {
+            "pivot".into()
+        },
+        uid_map: None,
+        gid_map: None,
+        security_opt: Vec::new(),
+        command: s.command.clone(),
+    };
+
+    Ok(Prepared {
+        id: s.id.clone(),
+        bundle: s.bundle.clone(),
+        cfg,
+        opts,
+        args,
+        limits,
+        state_root: state_root.to_path_buf(),
+        tee_log: false,
+    })
+}
+
+fn parse_restart_policy(s: &str) -> RestartPolicy {
+    match s {
+        "always" => RestartPolicy::Always,
+        "unless-stopped" => RestartPolicy::UnlessStopped,
+        "on-failure" => RestartPolicy::OnFailure(None),
+        x if x.starts_with("on-failure:") => {
+            let n = x["on-failure:".len()..].parse().ok();
+            RestartPolicy::OnFailure(n)
+        }
+        _ => RestartPolicy::No,
+    }
 }
 
 pub fn prepare(args: &RunArgs, state_root: &Path, concurrency: usize) -> Result<Prepared> {

@@ -137,6 +137,53 @@ pub fn stop(root: &Path, ids: &[String], timeout_secs: u64) -> Result<i32> {
     Ok(0)
 }
 
+/// 对齐 `docker start`：启动已停止的容器（复用原有 bundle / 网络 endpoint）。
+pub fn start(root: &Path, ids: &[String]) -> Result<i32> {
+    for input in ids {
+        start_one(root, input)?;
+    }
+    Ok(0)
+}
+
+/// 对齐 `docker restart`：对每个容器先 stop 再 start。
+pub fn restart(root: &Path, ids: &[String], timeout_secs: u64) -> Result<i32> {
+    for input in ids {
+        stop_one(root, input, timeout_secs)?;
+        start_one(root, input)?;
+    }
+    Ok(0)
+}
+
+fn start_one(root: &Path, id_input: &str) -> Result<()> {
+    let (id, prepared) = {
+        let _g = state::lock(root)?;
+        let id = state::resolve_id(root, id_input)?;
+        let s = state::load(root, &id)?;
+
+        if effective_status(&s) == "running" {
+            bail!("容器 {id} 已在运行");
+        }
+        if s.supervisor_pid.is_some_and(state::alive) {
+            bail!(
+                "容器 {id} 的 supervisor 仍在运行（pid={}）",
+                s.supervisor_pid.unwrap()
+            );
+        }
+
+        // 清 stop marker，否则 supervisor 一启动就会立刻退出
+        state::clear_stop_marker(root, &id);
+
+        let prepared = crate::container::prepare_from_state(root, &s)?;
+        (id, prepared)
+    };
+
+    let code = crate::supervisor::spawn_supervisor(prepared)?;
+    if code != 0 {
+        bail!("启动容器 {id} 失败（supervisor 退出码 {code}）");
+    }
+    Ok(())
+}
+
 fn stop_one(root: &Path, id_input: &str, timeout_secs: u64) -> Result<()> {
     let (id, pid, supervisor_pid, sig_name, sig) = {
         let _g = state::lock(root)?;
