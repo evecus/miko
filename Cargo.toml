@@ -21,3 +21,5 @@ nix = { version = "0.31", features = ["sched", "mount", "process", "signal", "fs
 
 [profile.release]
 strip = true
+lto = "thin"
+panic = "abort"

@@ -71,9 +71,16 @@ fn ret(k: u32) -> SockFilter {
     }
 }
 
+/// `SYS_kexec_file_load`：x86_64=320、aarch64=294。
+/// musl 部分目标未导出该常量，故按架构写死，避免依赖 libc 是否声明。
+#[cfg(target_arch = "x86_64")]
+const SYS_KEXEC_FILE_LOAD: u32 = 320;
+#[cfg(target_arch = "aarch64")]
+const SYS_KEXEC_FILE_LOAD: u32 = 294;
+
 /// 明确拒绝的 syscall（容器进程没有任何理由调用它们）。
-/// 编号用 `libc::SYS_*`：libc 在 x86_64 与 aarch64 上分别给出各自正确的值，
-/// 因此这份列表是跨架构的，不需要维护两套编号表。
+/// 编号优先用 `libc::SYS_*`（按目标架构条件编译给出正确值）；
+/// 个别常量在 musl 上缺失时用上面的硬编码补齐。
 fn denied_syscalls() -> Result<Vec<u32>> {
     // 其他架构（riscv 等）既不提供 audit arch 也不保证 libc 常量齐全，直接拒绝启动。
     crate::arch::host()?;
@@ -85,7 +92,7 @@ fn denied_syscalls() -> Result<Vec<u32>> {
         libc::SYS_delete_module as u32,
         libc::SYS_finit_module as u32,
         libc::SYS_kexec_load as u32,
-        libc::SYS_kexec_file_load as u32,
+        SYS_KEXEC_FILE_LOAD,
         libc::SYS_open_by_handle_at as u32,
         libc::SYS_name_to_handle_at as u32,
         libc::SYS_perf_event_open as u32,

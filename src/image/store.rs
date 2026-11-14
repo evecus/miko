@@ -26,7 +26,9 @@ use crate::state;
 
 const INDEX_VERSION: u32 = 1;
 /// `FICLONE`（linux/fs.h）：在支持 reflink 的文件系统上做 CoW 复制，不支持则回退普通复制。
-const FICLONE: libc::c_ulong = 0x4004_9409;
+/// 数值本身与架构无关；ioctl 的 request 参数在 gnu/musl、x86_64/aarch64 上类型不一致
+///（`c_ulong` vs `c_int`），调用处用 `as _` 适配。
+const FICLONE: u64 = 0x4004_9409;
 
 // ---------------------------------------------------------------- 索引结构
 
@@ -625,7 +627,14 @@ fn clone_file(src: &Path, dst: &Path) -> Result<()> {
     let mut sf = File::open(src).with_context(|| format!("打开 {} 失败", src.display()))?;
     let mut df = File::create(dst).with_context(|| format!("创建 {} 失败", dst.display()))?;
     // FICLONE 成功则 df 与 sf 共享 extent；失败（EOPNOTSUPP/ENOTTY/EXDEV）回退普通复制。
-    let rc = unsafe { libc::ioctl(df.as_raw_fd(), FICLONE, sf.as_raw_fd() as libc::c_ulong) };
+    // request 用 `as _`：aarch64/musl 上 ioctl 要 i32，x86_64/gnu 上常是 c_ulong。
+    let rc = unsafe {
+        libc::ioctl(
+            df.as_raw_fd(),
+            FICLONE as _,
+            sf.as_raw_fd() as libc::c_ulong,
+        )
+    };
     if rc != 0 {
         io::copy(&mut sf, &mut df)
             .with_context(|| format!("复制 {} -> {} 失败", src.display(), dst.display()))?;
@@ -825,6 +834,8 @@ fn parse_rfc3339(s: &str) -> Result<Option<u64>> {
 
 fn rfc3339(ts: u64) -> String {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // libc::time_t 在 musl 目标上标了 deprecated（将固定为 64 位），此处仅作转换，压制告警。
+    #[allow(deprecated)]
     let t = ts as libc::time_t;
     unsafe { libc::gmtime_r(&t, &mut tm) };
     format!(
