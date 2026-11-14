@@ -74,7 +74,9 @@ pub fn exec(root: &Path, args: &ExecArgs) -> Result<i32> {
         bail!("创建 pid pipe 失败: {}", io::Error::last_os_error());
     }
 
-    // TTY：父进程持有 master，子进程拿到 slave 路径
+    // TTY：在**宿主 mnt ns** 里同时打开 master 与 slave。
+    // setns 进入容器 mnt ns 后，宿主的 /dev/pts/N 路径不可见，
+    // 但已经打开的 slave fd 仍然有效（与 runc 一致）。
     let pty = if args.tty {
         Some(open_pty().context("分配伪终端失败")?)
     } else {
@@ -85,6 +87,12 @@ pub fn exec(root: &Path, args: &ExecArgs) -> Result<i32> {
         ForkResult::Parent { child } => {
             unsafe {
                 close(pid_pipe[1]).ok();
+            }
+            // 父进程不需要 slave
+            if let Some(ref p) = pty {
+                unsafe {
+                    let _ = close(p.slave);
+                }
             }
             // 读最终子进程 pid
             let mut buf = [0u8; 8];
@@ -114,6 +122,11 @@ pub fn exec(root: &Path, args: &ExecArgs) -> Result<i32> {
 
             if args.detach {
                 // 脱离：中间进程已退出（或很快退出），业务进程由容器 init 收养
+                if let Some(ref p) = pty {
+                    unsafe {
+                        let _ = close(p.master);
+                    }
+                }
                 let _ = waitpid(child, None);
                 println!("{exec_pid}");
                 return Ok(0);
@@ -134,17 +147,20 @@ pub fn exec(root: &Path, args: &ExecArgs) -> Result<i32> {
             unsafe {
                 close(pid_pipe[0]).ok();
             }
-            // 关闭父进程侧 pty master（若有）
-            if let Some(ref p) = pty {
+            // 关闭父进程侧 pty master（若有）；保留 slave fd 传给最终子进程
+            let slave_fd = if let Some(ref p) = pty {
                 unsafe {
                     let _ = close(p.master);
                 }
-            }
+                Some(p.slave)
+            } else {
+                None
+            };
 
             let result = child_enter_and_exec(
                 &mut namespaces,
                 cgroup_procs.as_deref(),
-                pty.as_ref().map(|p| p.slave_path.as_str()),
+                slave_fd,
                 args,
                 uid,
                 gid,
@@ -171,7 +187,7 @@ pub fn exec(root: &Path, args: &ExecArgs) -> Result<i32> {
 fn child_enter_and_exec(
     namespaces: &mut [NsTarget],
     cgroup_procs: Option<&Path>,
-    slave_path: Option<&str>,
+    slave_fd: Option<RawFd>,
     args: &ExecArgs,
     uid: u32,
     gid: u32,
@@ -267,9 +283,9 @@ fn child_enter_and_exec(
                 let _ = fs::write(procs, std::process::id().to_string());
             }
 
-            // TTY：打开 slave，设为控制终端
-            if let Some(path) = slave_path {
-                setup_tty_slave(path, args.interactive)?;
+            // TTY：使用宿主侧已打开的 slave fd（跨 mnt ns 仍然有效）
+            if let Some(sfd) = slave_fd {
+                setup_tty_slave_fd(sfd)?;
             } else if !args.interactive {
                 // 非交互：stdin 接到 /dev/null，避免读宿主终端
                 let null = OpenOptions::new().read(true).write(true).open("/dev/null")?;
@@ -496,7 +512,8 @@ fn find_cgroup_procs(id: &str) -> Option<PathBuf> {
 
 struct Pty {
     master: RawFd,
-    slave_path: String,
+    /// 在宿主 mnt ns 打开的 slave；setns 后仍可 dup2 / TIOCSCTTY
+    slave: RawFd,
 }
 
 fn open_pty() -> Result<Pty> {
@@ -526,24 +543,31 @@ fn open_pty() -> Result<Pty> {
     let path = unsafe { CStr::from_ptr(buf.as_ptr()) }
         .to_string_lossy()
         .into_owned();
-    Ok(Pty {
-        master,
-        slave_path: path,
-    })
+    // 关键：在宿主命名空间打开 slave。进入容器 mnt ns 后再 open 路径会 ENOENT。
+    let slave = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(f) => f.into_raw_fd(),
+        Err(e) => {
+            unsafe {
+                close(master).ok();
+            }
+            bail!("打开 pty slave {path} 失败: {e}");
+        }
+    };
+    Ok(Pty { master, slave })
 }
 
-fn setup_tty_slave(path: &str, interactive: bool) -> Result<()> {
-    let slave = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .with_context(|| format!("打开 pty slave {path} 失败"))?;
-    let sfd = slave.as_raw_fd();
-
-    // 新会话 + 控制终端
+fn setup_tty_slave_fd(sfd: RawFd) -> Result<()> {
+    // 新会话 + 控制终端；sfd 是宿主侧打开的，跨 mnt ns 仍然有效
     unsafe {
-        libc::setsid();
-        libc::ioctl(sfd, libc::TIOCSCTTY as _, 0);
+        if libc::setsid() < 0 {
+            // 已是 session leader 时可能失败，不致命
+        }
+        // TIOCSCTTY：把 slave 设为控制终端
+        if libc::ioctl(sfd, libc::TIOCSCTTY as _, 0) != 0 {
+            // 某些环境无控制终端权限时失败，仍继续 dup stdio
+            let err = io::Error::last_os_error();
+            eprintln!("miko: TIOCSCTTY 警告: {err}");
+        }
         libc::dup2(sfd, 0);
         libc::dup2(sfd, 1);
         libc::dup2(sfd, 2);
@@ -551,9 +575,6 @@ fn setup_tty_slave(path: &str, interactive: bool) -> Result<()> {
             libc::close(sfd);
         }
     }
-    let _ = interactive; // stdin 已接在 slave 上
-    // 防止 RAII 再次 close 已 dup 的 fd
-    std::mem::forget(slave);
     Ok(())
 }
 
