@@ -255,6 +255,8 @@ pub fn prepare_from_state(state_root: &Path, s: &state::ContainerState) -> Resul
         dns_opts: cfg.miko.dns_opts.clone(),
         extra_hosts: cfg.miko.extra_hosts.clone(),
         ports: s.ports.clone(),
+        // bind 卷已写入 bundle 的 config.json mounts；start 时由 __init 按 spec 挂载
+        volumes: Vec::new(),
         seccomp,
         apparmor,
         userns: cfg.miko.userns,
