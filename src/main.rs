@@ -1,6 +1,7 @@
 mod arch;
 mod cli;
 mod container;
+mod exec;
 mod image;
 mod lifecycle;
 mod network;
@@ -78,6 +79,7 @@ fn real_main() -> Result<i32> {
         cli::Command::Kill(a) => lifecycle::kill(&state_root, &a.id, a.signal.as_deref()),
         cli::Command::Rm(a) => lifecycle::rm(&state_root, &a.ids, a.force),
         cli::Command::Logs(a) => lifecycle::logs(&state_root, &a.id),
+        cli::Command::Exec(a) => exec::exec(&state_root, &a),
         cli::Command::System(a) => match a.command {
             cli::SystemCommand::Prune => lifecycle::prune(&state_root),
         },

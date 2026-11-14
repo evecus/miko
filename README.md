@@ -19,7 +19,7 @@ manifest，seccomp 过滤器在两个架构上都生效，CI 对两者都做构�
 | **网络** | **bridge / macvlan / none / host 四种驱动；`network create/ls/inspect/rm/prune/connect/disconnect` 管理；每网络独立 IPAM（subnet / gateway / ip-range / aux-address / --ip / --mac-address）；容器多网络接入与运行中热插拔；`--dns` / `--add-host` / `--network-alias` 名字发现** |
 | 防火墙 | 网络级 MASQUERADE / ICC 规则，**nftables 优先、iptables 降级**（对齐 docker `--firewall-backend`），支持 `--internal` 与 `enable_ip_masquerade=false` |
 | 端口映射 | 纯用户态 TCP/UDP 转发器（仅 bridge 网络，不需要 DNAT 权限） |
-| 生命周期 | 前台 run / `-d` 双 fork supervisor / 重启策略 / ps、kill、rm、logs、`system prune` |
+| 生命周期 | 前台 run / `-d` 双 fork supervisor / 重启策略 / ps、kill、rm、logs、**exec（含 -it）**、`system prune` |
 | 状态 | `<state_root>` 下的 `state.json` + `networks.json` + flock，无 daemon |
 
 ## 编译
@@ -319,8 +319,8 @@ run
 - macvlan 的宿主 ↔ 容器默认不通（内核限制），且不支持 `-p` 端口发布。
 - 端口映射是纯用户态转发器，性能低于内核 DNAT。
 - seccomp 是「默认允许 + 显式拒绝危险 syscall」的保守子集，不是白名单式 deny-all。
-- 没有 `exec`、`-it`、健康检查、镜像构建；OCI runtime-spec 只实现子集，
-  `config.json` 含 `miko` 自有扩展字段。
+- 支持 `exec`（`-it` / `-u` / `-w` / `-e` / `-d` / `--privileged`，路径对齐 runc setns）；
+  没有健康检查、镜像构建；OCI runtime-spec 只实现子集，`config.json` 含 `miko` 自有扩展字段。
 - 镜像管理仍是子集：无 `docker login` 凭据（仅匿名 Bearer token）、`build` /
   `commit` / `push` / `import`、`history`；`images --format` 与 `--filter` 只实现常用字段。
 

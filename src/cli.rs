@@ -65,6 +65,9 @@ pub enum Command {
     /// 查看容器日志
     Logs(LogsArgs),
 
+    /// 在运行中的容器里执行新进程（对齐 docker exec / runc exec）
+    Exec(ExecArgs),
+
     /// 清理崩溃残留的内核资源
     System(SystemArgs),
 
@@ -380,6 +383,45 @@ pub struct RmArgs {
 pub struct LogsArgs {
     /// 容器 id 或名称
     pub id: String,
+}
+
+#[derive(clap::Args, Debug)]
+#[command(about = "在运行中的容器里执行命令（setns 进入全部 namespace）")]
+pub struct ExecArgs {
+    /// 容器 id 或名称
+    pub container: String,
+
+    /// 保持 STDIN 打开
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
+
+    /// 分配伪终端
+    #[arg(short = 't', long)]
+    pub tty: bool,
+
+    /// 后台运行（打印宿主 pid 后立即返回）
+    #[arg(short = 'd', long)]
+    pub detach: bool,
+
+    /// 容器内用户 uid[:gid] 或用户名（查容器 /etc/passwd）
+    #[arg(short = 'u', long = "user", value_name = "USER")]
+    pub user: Option<String>,
+
+    /// 工作目录（容器内路径）
+    #[arg(short = 'w', long = "workdir", value_name = "DIR")]
+    pub workdir: Option<String>,
+
+    /// 环境变量 KEY=VALUE（可重复；覆盖容器默认）
+    #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+    pub envs: Vec<String>,
+
+    /// 以特权模式执行（尽力提升 capability）
+    #[arg(long)]
+    pub privileged: bool,
+
+    /// 要执行的命令及其参数（放在容器名之后）
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
