@@ -59,14 +59,23 @@ pub enum Command {
     /// 向容器发送信号
     Kill(KillArgs),
 
-    /// 优雅停止容器（先 StopSignal，超时后 SIGKILL；对齐 docker stop）
+    /// 优雅停止容器（写 stop marker = 用户意图；对齐 docker stop）
     Stop(StopArgs),
+
+    /// 运行时停机（不写 stop marker；关机/维护用，下次仍可自动恢复）
+    Halt(HaltArgs),
 
     /// 启动已停止的容器（复用原 bundle / 网络；对齐 docker start）
     Start(StartArgs),
 
-    /// 重启容器（先 stop 再 start；对齐 docker restart）
+    /// 重启容器（用户意图：先 stop 再 start；对齐 docker restart）
     Restart(RestartArgs),
+
+    /// 运行时重启（halt + start，不改变「是否被用户停过」）
+    Reload(ReloadArgs),
+
+    /// 可选常驻进程：开机恢复 + 崩溃兜底拉起（容器不与 daemon 同生共死）
+    Daemon(DaemonArgs),
 
     /// 删除已停止的容器
     Rm(RmArgs),
@@ -239,6 +248,27 @@ pub struct RunArgs {
     #[arg(long = "security-opt", value_name = "KEY=VALUE")]
     pub security_opt: Vec<String>,
 
+    // ------------------------------------------------------------ 健康检查（由 miko daemon 执行）
+    /// 容器内健康检查命令（shell），如 `curl -f http://127.0.0.1/ || exit 1`
+    #[arg(long = "health-cmd", value_name = "CMD")]
+    pub health_cmd: Option<String>,
+
+    /// 健康检查间隔秒数（默认 30）
+    #[arg(long = "health-interval", default_value_t = 30)]
+    pub health_interval: u64,
+
+    /// 单次检查超时秒数（默认 5）
+    #[arg(long = "health-timeout", default_value_t = 5)]
+    pub health_timeout: u64,
+
+    /// 连续失败多少次视为 unhealthy 并 reload（默认 3）
+    #[arg(long = "health-retries", default_value_t = 3)]
+    pub health_retries: u32,
+
+    /// 启动宽限期秒数（期内失败不计入 retries，默认 0）
+    #[arg(long = "health-start-period", default_value_t = 0)]
+    pub health_start_period: u64,
+
     /// 覆盖镜像 CMD（放在 `--` 之后）
     #[arg(last = true)]
     pub command: Vec<String>,
@@ -379,31 +409,84 @@ pub struct KillArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct StopArgs {
-    /// 容器 id 或名称（可多个）
-    #[arg(required = true)]
+    /// 容器 id 或名称（可多个；与 --all 二选一）
+    #[arg(required_unless_present = "all")]
     pub ids: Vec<String>,
 
-    /// 等待优雅退出的秒数，超时后 SIGKILL（默认 10，对齐 docker stop）
+    /// 全部运行中的容器
+    #[arg(long, short = 'a')]
+    pub all: bool,
+
+    /// 等待优雅退出的秒数，超时后 SIGKILL（默认 10）
+    #[arg(short = 't', long = "time", default_value_t = 10)]
+    pub time: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct HaltArgs {
+    /// 容器 id 或名称（可多个；与 --all 二选一）
+    #[arg(required_unless_present = "all")]
+    pub ids: Vec<String>,
+
+    /// 全部运行中的容器
+    #[arg(long, short = 'a')]
+    pub all: bool,
+
+    /// 等待优雅退出的秒数（默认 10）
     #[arg(short = 't', long = "time", default_value_t = 10)]
     pub time: u64,
 }
 
 #[derive(clap::Args, Debug)]
 pub struct StartArgs {
-    /// 容器 id 或名称（可多个）
-    #[arg(required = true)]
+    /// 容器 id 或名称（可多个；与 --all 二选一）
+    #[arg(required_unless_present = "all")]
     pub ids: Vec<String>,
+
+    /// 全部已停止的容器
+    #[arg(long, short = 'a')]
+    pub all: bool,
 }
 
 #[derive(clap::Args, Debug)]
 pub struct RestartArgs {
-    /// 容器 id 或名称（可多个）
-    #[arg(required = true)]
+    /// 容器 id 或名称（可多个；与 --all 二选一）
+    #[arg(required_unless_present = "all")]
     pub ids: Vec<String>,
 
-    /// stop 阶段等待优雅退出的秒数，超时后 SIGKILL（默认 10）
+    /// 全部已登记容器
+    #[arg(long, short = 'a')]
+    pub all: bool,
+
+    /// stop 阶段等待秒数（默认 10）
     #[arg(short = 't', long = "time", default_value_t = 10)]
     pub time: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ReloadArgs {
+    /// 容器 id 或名称（可多个；与 --all 二选一）
+    #[arg(required_unless_present = "all")]
+    pub ids: Vec<String>,
+
+    /// 全部已登记容器
+    #[arg(long, short = 'a')]
+    pub all: bool,
+
+    /// halt 阶段等待秒数（默认 10）
+    #[arg(short = 't', long = "time", default_value_t = 10)]
+    pub time: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct DaemonArgs {
+    /// 监控 / 健康检查扫描间隔（秒）
+    #[arg(long, default_value_t = 5)]
+    pub interval: u64,
+
+    /// 退出时 halt 全部容器（默认 false：只监控不托管，容器继续跑）
+    #[arg(long, default_value_t = false)]
+    pub halt_on_exit: bool,
 }
 
 #[derive(clap::Args, Debug)]

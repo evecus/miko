@@ -1,6 +1,7 @@
 mod arch;
 mod cli;
 mod container;
+mod daemon;
 mod exec;
 mod image;
 mod lifecycle;
@@ -13,6 +14,14 @@ mod supervisor;
 
 use anyhow::Result;
 use clap::Parser;
+
+fn ids_or_all(all: bool, ids: Vec<String>) -> Vec<String> {
+    if all {
+        vec!["*".into()]
+    } else {
+        ids
+    }
+}
 
 fn main() {
     let code = match real_main() {
@@ -77,9 +86,27 @@ fn real_main() -> Result<i32> {
         }
         cli::Command::Ps(a) => lifecycle::ps(&state_root, a.all),
         cli::Command::Kill(a) => lifecycle::kill(&state_root, &a.id, a.signal.as_deref()),
-        cli::Command::Stop(a) => lifecycle::stop(&state_root, &a.ids, a.time),
-        cli::Command::Start(a) => lifecycle::start(&state_root, &a.ids),
-        cli::Command::Restart(a) => lifecycle::restart(&state_root, &a.ids, a.time),
+        cli::Command::Stop(a) => {
+            let ids = ids_or_all(a.all, a.ids);
+            lifecycle::stop(&state_root, &ids, a.time)
+        }
+        cli::Command::Halt(a) => {
+            let ids = ids_or_all(a.all, a.ids);
+            lifecycle::halt(&state_root, &ids, a.time)
+        }
+        cli::Command::Start(a) => {
+            let ids = ids_or_all(a.all, a.ids);
+            lifecycle::start(&state_root, &ids)
+        }
+        cli::Command::Restart(a) => {
+            let ids = ids_or_all(a.all, a.ids);
+            lifecycle::restart(&state_root, &ids, a.time)
+        }
+        cli::Command::Reload(a) => {
+            let ids = ids_or_all(a.all, a.ids);
+            lifecycle::reload(&state_root, &ids, a.time)
+        }
+        cli::Command::Daemon(a) => daemon::run(&state_root, a.interval, a.halt_on_exit),
         cli::Command::Rm(a) => lifecycle::rm(&state_root, &a.ids, a.force),
         cli::Command::Logs(a) => lifecycle::logs(&state_root, &a.id),
         cli::Command::Exec(a) => exec::exec(&state_root, &a),

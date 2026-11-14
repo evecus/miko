@@ -316,6 +316,23 @@ pub fn prepare_from_state(state_root: &Path, s: &state::ContainerState) -> Resul
         uid_map: None,
         gid_map: None,
         security_opt: Vec::new(),
+        health_cmd: s.healthcheck.as_ref().map(|h| h.test.clone()),
+        health_interval: s
+            .healthcheck
+            .as_ref()
+            .map(|h| h.interval_secs)
+            .unwrap_or(30),
+        health_timeout: s
+            .healthcheck
+            .as_ref()
+            .map(|h| h.timeout_secs)
+            .unwrap_or(5),
+        health_retries: s.healthcheck.as_ref().map(|h| h.retries).unwrap_or(3),
+        health_start_period: s
+            .healthcheck
+            .as_ref()
+            .map(|h| h.start_period_secs)
+            .unwrap_or(0),
         command: s.command.clone(),
     };
 
@@ -462,6 +479,15 @@ pub fn prepare(args: &RunArgs, state_root: &Path, concurrency: usize) -> Result<
                 } else {
                     Vec::new()
                 },
+                healthcheck: args.health_cmd.as_ref().map(|cmd| state::Healthcheck {
+                    test: cmd.clone(),
+                    interval_secs: args.health_interval.max(1),
+                    timeout_secs: args.health_timeout.max(1),
+                    retries: args.health_retries.max(1),
+                    start_period_secs: args.health_start_period,
+                }),
+                health_status: args.health_cmd.as_ref().map(|_| "starting".into()),
+                health_fail_streak: 0,
             },
         )?;
     }

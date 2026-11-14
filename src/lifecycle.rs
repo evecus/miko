@@ -67,6 +67,10 @@ fn ports_label(s: &ContainerState) -> String {
         .join(",")
 }
 
+pub fn effective_status_pub(s: &ContainerState) -> String {
+    effective_status(s)
+}
+
 fn effective_status(s: &ContainerState) -> String {
     if s.status == "running" {
         let up = state::alive(s.pid) || s.supervisor_pid.is_some_and(state::alive);
@@ -129,29 +133,64 @@ pub fn kill(root: &Path, id_input: &str, signal: Option<&str>) -> Result<i32> {
 }
 
 /// 对齐 `docker stop`：先发 StopSignal（默认 TERM），等待最多 `timeout` 秒，
-/// 仍未退出再 SIGKILL。同时给 supervisor 发 TERM 阻止重启策略拉起。
+/// 仍未退出再 SIGKILL。写 stop marker = **用户意图停止**（unless-stopped 不再自动拉起）。
 pub fn stop(root: &Path, ids: &[String], timeout_secs: u64) -> Result<i32> {
-    for input in ids {
-        stop_one(root, input, timeout_secs)?;
+    let targets = resolve_targets(root, ids, TargetSet::Running)?;
+    for id in &targets {
+        stop_one(root, id, timeout_secs, /*record_stop*/ true)?;
+    }
+    Ok(0)
+}
+
+/// 运行时停机（不停记用户意图）：**不写** stop marker。
+/// 用于 host 关机 / `miko daemon` 退出 / 维护窗口；下次 daemon 启动仍会按策略恢复。
+pub fn halt(root: &Path, ids: &[String], timeout_secs: u64) -> Result<i32> {
+    let targets = resolve_targets(root, ids, TargetSet::Running)?;
+    for id in &targets {
+        stop_one(root, id, timeout_secs, /*record_stop*/ false)?;
     }
     Ok(0)
 }
 
 /// 对齐 `docker start`：启动已停止的容器（复用原有 bundle / 网络 endpoint）。
 pub fn start(root: &Path, ids: &[String]) -> Result<i32> {
-    for input in ids {
-        start_one(root, input)?;
+    let targets = resolve_targets(root, ids, TargetSet::Startable)?;
+    for id in &targets {
+        start_one(root, id)?;
     }
     Ok(0)
 }
 
-/// 对齐 `docker restart`：对每个容器先 stop 再 start。
+/// 对齐 `docker restart`：用户意图重启（先记 stop 再 start，start 会清 marker）。
 pub fn restart(root: &Path, ids: &[String], timeout_secs: u64) -> Result<i32> {
-    for input in ids {
-        stop_one(root, input, timeout_secs)?;
-        start_one(root, input)?;
+    let targets = resolve_targets(root, ids, TargetSet::Existing)?;
+    for id in &targets {
+        stop_one(root, id, timeout_secs, /*record_stop*/ true)?;
+        start_one(root, id)?;
     }
     Ok(0)
+}
+
+/// 运行时重启：halt（不记 marker）+ start，不改变「用户是否手动停过」的语义。
+pub fn reload(root: &Path, ids: &[String], timeout_secs: u64) -> Result<i32> {
+    let targets = resolve_targets(root, ids, TargetSet::Existing)?;
+    for id in &targets {
+        stop_one(root, id, timeout_secs, /*record_stop*/ false)?;
+        start_one(root, id)?;
+    }
+    Ok(0)
+}
+
+/// 是否应在 daemon 启动 / 监控循环中自动拉起。
+pub fn should_auto_start(root: &Path, s: &ContainerState) -> bool {
+    if state::has_stop_marker(root, &s.id) {
+        return false;
+    }
+    match s.restart_policy.as_str() {
+        "always" | "unless-stopped" => true,
+        // on-failure：仅在上次非 0 退出时由监控循环处理，开机不盲目 start
+        _ => false,
+    }
 }
 
 fn start_one(root: &Path, id_input: &str) -> Result<()> {
@@ -184,7 +223,45 @@ fn start_one(root: &Path, id_input: &str) -> Result<()> {
     Ok(())
 }
 
-fn stop_one(root: &Path, id_input: &str, timeout_secs: u64) -> Result<()> {
+enum TargetSet {
+    /// 当前 running
+    Running,
+    /// 已存在且未 running（可供 start）
+    Startable,
+    /// 任意已登记容器
+    Existing,
+}
+
+fn resolve_targets(root: &Path, ids: &[String], set: TargetSet) -> Result<Vec<String>> {
+    if ids.len() == 1 && ids[0] == "--all" {
+        // 防御：若 clap 把 --all 吃掉则不会走到这里
+    }
+    if ids.is_empty() {
+        bail!("请指定容器 id，或使用 --all");
+    }
+    // --all 由上层传入特殊标记 "*"
+    if ids.len() == 1 && ids[0] == "*" {
+        let all = state::list(root)?;
+        let mut out = Vec::new();
+        for s in all {
+            match set {
+                TargetSet::Running if effective_status(&s) == "running" => out.push(s.id),
+                TargetSet::Startable if effective_status(&s) != "running" => out.push(s.id),
+                TargetSet::Existing => out.push(s.id),
+                _ => {}
+            }
+        }
+        return Ok(out);
+    }
+    let mut out = Vec::new();
+    for input in ids {
+        let id = state::resolve_id(root, input)?;
+        out.push(id);
+    }
+    Ok(out)
+}
+
+fn stop_one(root: &Path, id_input: &str, timeout_secs: u64, record_stop: bool) -> Result<()> {
     let (id, pid, supervisor_pid, sig_name, sig) = {
         let _g = state::lock(root)?;
         let id = state::resolve_id(root, id_input)?;
@@ -193,17 +270,26 @@ fn stop_one(root: &Path, id_input: &str, timeout_secs: u64) -> Result<()> {
         let sig = parse_signal(&sig_name)
             .with_context(|| format!("容器 {id} 的 StopSignal {sig_name:?} 非法"))?;
 
-        // 先打 stop marker，避免 always / unless-stopped 在等待期间被拉起
-        state::set_stop_marker(root, &id)?;
+        // 用户 stop：打 marker，阻止 always/unless-stopped 被 supervisor/daemon 立刻拉起
+        // 运行时 halt：不打 marker，关机后再起来仍可自动恢复
+        if record_stop {
+            state::set_stop_marker(root, &id)?;
+        }
 
         if !state::alive(s.pid) && !s.supervisor_pid.is_some_and(state::alive) {
             let mut s = s;
-            s.status = "stopped".into();
+            s.status = if record_stop {
+                "stopped".into()
+            } else {
+                "exited".into()
+            };
             if s.finished_at.is_none() {
                 s.finished_at = Some(state::now());
             }
             state::save(root, &s)?;
-            println!("miko: 容器 {id} 已不在运行，仅记录停止状态");
+            if record_stop {
+                println!("miko: 容器 {id} 已不在运行，仅记录停止状态");
+            }
             return Ok(());
         }
 
@@ -261,8 +347,13 @@ fn stop_one(root: &Path, id_input: &str, timeout_secs: u64) -> Result<()> {
 
     let _g = state::lock(root)?;
     let mut s = state::load(root, &id)?;
-    s.status = "stopped".into();
+    s.status = if record_stop {
+        "stopped".into()
+    } else {
+        "exited".into()
+    };
     s.finished_at = Some(state::now());
+    s.supervisor_pid = None;
     // pid 仍可能短暂存在于 state，effective_status 会用 alive() 判断
     state::save(root, &s)?;
     println!("{id}");

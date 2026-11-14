@@ -63,6 +63,40 @@ pub struct ContainerState {
     /// 该容器所有 endpoint 的宿主侧设备名，供 rm / system prune 兜底清理
     #[serde(default)]
     pub host_ifaces: Vec<String>,
+    /// 健康检查（可选；由 daemon 执行）
+    #[serde(default)]
+    pub healthcheck: Option<Healthcheck>,
+    /// starting / healthy / unhealthy；无 healthcheck 时为 None
+    #[serde(default)]
+    pub health_status: Option<String>,
+    /// 连续失败次数（daemon 维护）
+    #[serde(default)]
+    pub health_fail_streak: u32,
+}
+
+/// 对齐 Docker HEALTHCHECK 的子集（在容器内跑 shell 命令）。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Healthcheck {
+    /// 如 `curl -f http://127.0.0.1/ || exit 1`
+    pub test: String,
+    #[serde(default = "default_health_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_health_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_health_retries")]
+    pub retries: u32,
+    #[serde(default)]
+    pub start_period_secs: u64,
+}
+
+fn default_health_interval() -> u64 {
+    30
+}
+fn default_health_timeout() -> u64 {
+    5
+}
+fn default_health_retries() -> u32 {
+    3
 }
 
 fn default_stop_signal() -> String {
